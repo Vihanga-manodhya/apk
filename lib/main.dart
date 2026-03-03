@@ -1,121 +1,259 @@
+import 'dart:io';
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:google_generative_ai/google_generative_ai.dart';
 
 void main() {
-  runApp(const MyApp());
+  runApp(const SmartProductScannerApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class SmartProductScannerApp extends StatelessWidget {
+  const SmartProductScannerApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      title: 'AI Product Scanner',
+      theme: ThemeData(primarySwatch: Colors.deepPurple),
+      home: const AIScannerScreen(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class AIScannerScreen extends StatefulWidget {
+  const AIScannerScreen({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<AIScannerScreen> createState() => _AIScannerScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _AIScannerScreenState extends State<AIScannerScreen> {
+  // --- Your Exact API Key is officially linked here! ---
+  static const String _apiKey = 'AIzaSyD4I4p15HALHiGrSR_A61qPKmq3bfkTT7Q'; 
+  
+  final ImagePicker _picker = ImagePicker();
+  final TextRecognizer _textRecognizer = TextRecognizer();
+  
+  bool _isProcessing = false;
+  String _accumulatedText = ''; // Holds text from the photos
+  int _scanCount = 0;
+  
+  // Parsed Details to show on screen
+  String _productName = 'Not found';
+  String _batchNo = 'Not found';
+  String _mfgDate = 'Not found';
+  String _expDate = 'Not found';
 
-  void _incrementCounter() {
+  /// 1. Take a picture and read the messy text
+  Future<void> _scanSide() async {
+    final XFile? image = await _picker.pickImage(source: ImageSource.camera);
+    if (image == null) return;
+
+    setState(() => _isProcessing = true);
+
+    try {
+      final inputImage = InputImage.fromFilePath(image.path);
+      final RecognizedText recognizedText = await _textRecognizer.processImage(inputImage);
+      
+      setState(() {
+        _accumulatedText += '\n--- Scan ${++_scanCount} ---\n';
+        _accumulatedText += recognizedText.text;
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Photo scanned! Take another photo, or click Analyze.')),
+      );
+      
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error reading photo: $e')),
+      );
+    } finally {
+      setState(() => _isProcessing = false);
+    }
+  }
+
+  /// 2. Send the messy text to Gemini AI to find the Batch and Expiry data
+  Future<void> _analyzeWithAI() async {
+    if (_accumulatedText.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please take at least one photo first.')),
+      );
+      return;
+    }
+
+    setState(() => _isProcessing = true);
+
+    try {
+      // Connecting to your Gemini AI model
+      final model = GenerativeModel(model: 'gemini-1.5-flash', apiKey: _apiKey);
+      
+      final prompt = '''
+      You are a helpful data extraction assistant. I am giving you messy text read from a product package. 
+      Extract the Product Name, Batch Number (often B/N, Lot), Manufacturing Date (MFD/MFG), and Expiry Date (EXP).
+      
+      Return ONLY a valid JSON object matching this exact format. If something is missing, write "Not found":
+      {"productName": "", "batchNo": "", "mfgDate": "", "expDate": ""}
+      
+      Here is the text from the package:
+      $_accumulatedText
+      ''';
+
+      final response = await model.generateContent([Content.text(prompt)]);
+      final responseText = response.text?.trim() ?? '';
+      
+      // Clean up the AI's response so Flutter can read it safely
+      final jsonString = responseText.replaceAll('```json', '').replaceAll('```', '').trim();
+      final Map<String, dynamic> data = jsonDecode(jsonString);
+
+      setState(() {
+        _productName = data['productName'] ?? 'Not found';
+        _batchNo = data['batchNo'] ?? 'Not found';
+        _mfgDate = data['mfgDate'] ?? 'Not found';
+        _expDate = data['expDate'] ?? 'Not found';
+      });
+
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('AI Analysis failed: $e')),
+      );
+    } finally {
+      setState(() => _isProcessing = false);
+    }
+  }
+
+  /// 3. Clear the screen to scan a new product
+  void _clearScans() {
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _accumulatedText = '';
+      _scanCount = 0;
+      _productName = 'Not found';
+      _batchNo = 'Not found';
+      _mfgDate = 'Not found';
+      _expDate = 'Not found';
     });
+  }
+
+  /// 4. Save the perfect details to a local text file
+  Future<void> _saveToTxt() async {
+    if (_batchNo == 'Not found' && _expDate == 'Not found') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No useful data to save yet. Scan and Analyze first!')),
+      );
+      return;
+    }
+
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File('${directory.path}/product_db.txt');
+
+      final dataToSave = '''
+--- Product Scan (${DateTime.now()}) ---
+Product: $_productName
+Batch: $_batchNo
+MFG: $_mfgDate
+EXP: $_expDate
+--------------------
+\n''';
+
+      await file.writeAsString(dataToSave, mode: FileMode.append);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Saved locally to: ${file.path}')),
+        );
+        _clearScans(); 
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to save file: $e')),
+        );
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _textRecognizer.close();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
+      appBar: AppBar(title: const Text('Smart AI Scanner')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16.0),
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.add_a_photo),
+                    label: Text('Take Photo ($_scanCount)'),
+                    onPressed: _isProcessing ? null : _scanSide,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_sweep, color: Colors.red),
+                  onPressed: _clearScans,
+                  tooltip: 'Clear Data',
+                )
+              ],
             ),
+            const SizedBox(height: 10),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.auto_awesome),
+              label: const Text('Analyze with AI'),
+              onPressed: _isProcessing || _scanCount == 0 ? null : _analyzeWithAI,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.deepPurple,
+                foregroundColor: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 20),
+            
+            if (_isProcessing) 
+              const Center(child: CircularProgressIndicator())
+            else ...[
+              const Text('AI Extracted Details:', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              Card(
+                elevation: 3,
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Product Name: $_productName', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                      const Divider(),
+                      Text('Batch No: $_batchNo'),
+                      Text('MFG Date: $_mfgDate'),
+                      Text('EXP Date: $_expDate'),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              
+              ElevatedButton.icon(
+                icon: const Icon(Icons.save),
+                label: const Text('Save to Local TXT'),
+                onPressed: _saveToTxt,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.all(16)
+                ),
+              ),
+            ]
           ],
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
       ),
     );
   }
